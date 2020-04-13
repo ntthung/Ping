@@ -1,0 +1,492 @@
+---
+title: "Ping River Streamflow Reconstruction with Linear Dynamical System"
+author: "Hung Nguyen"
+date: "2020-04-10"
+output: 
+  html_document:
+    theme: journal
+    toc: yes
+    toc_float: yes
+    highlight: haddock
+---
+
+# Introduction
+
+This repository reproduces the results by Nguyen and Galelli (2018), which reconstructs streamflow for the Ping River at station P.1. This work explores a novel reconstruction method using a Linear Dynamical System (LDS) model instead of the more conventionally used linear regression models. An LDS model is formulated as follows (Shumway and Stoffer, 1982; Ghahramani and Hinton, 1996).
+
+$$
+\begin{align}
+  x_{t+1} &= Ax_t + Bu_t + \eta_t\\
+  y_t &= Cx_t + Dv_t + \varepsilon_t \\
+  \eta_t & \sim \mathcal{N}(0, Q)\\
+  \varepsilon_t &\sim \mathcal{N}(0, R)\\
+  x_1 &\sim \mathcal{N}(0, V_1)
+\end{align}
+$$
+
+In the context of streamflow reconstruction, we can take $v = u$, which leads to the model presented in the paper.
+
+The LDS model parameters, together with the hidden state trajector $x$, are learned with an Expectation-Maximization (EM) algorithm. The details of this algorithm are presented in the paper, and the algrorithm has been implemented in the R package `ldsr`, adapted from the MATLAB code of Cheng and Sabes (2006). We will now load `ldsr` together with several packages that are used frequently in this repository. Other packages will be referred to with `::` when needed.
+
+```{r setup, warning=FALSE, message=FALSE}
+library(here)        # Pathing
+library(data.table)  # Data wrangling
+library(ldsr)        # Reconstruction
+library(ggplot2)     # Plotting
+library(patchwork)   # Arranging plots
+```
+
+# Data
+
+* Streamflow data: annual streamflow at station P.1, aggregated from monthly streamflow according to the hydrological year (April-March). Monthly streamflow was retrieved from the Thai Royal Irrigation Department.
+* Proxy data: 
+    - The Monsoon Asia Drought Atlas (MADA) (Cook *et al*, 2010).
+    - Tree ring data from the [Dendrobox project.](http://dendrobox.org)
+
+```{r read data}
+# STREAMFLOW DATA
+Qmonth <- fread(here('data/P1-monthly.csv'))
+Qmonth <- melt(Qmonth, id.var = 'year', variable.name = 'month', value.name = 'Q')
+Qann <- fread(here('data/P1-annual.csv'))
+P1_xy <- c(99.00443, 18.78766) # P.1 coordinates
+P1_df <- data.frame(long = P1_xy[1], lat = P1_xy[2]) # For plotting
+
+# PALEO DATA
+##  MADA
+madaMeta <- fread(here('data/mada_xy.csv'), colClasses = c(ID = 'character'))
+mada <- fread(here('data/jja-mada.txt'))[year >= 1600]
+madaMat <- as.matrix(mada[, -'year'])
+## Tree ring
+crnMeta <- fread(here('data/tree-ring/crn-meta.csv'))
+crn <- crnMeta[, fread(here(paste0('data/tree-ring/', .BY, '.csv'))), by = ID]
+allSites <- fread(here('data/tree-ring/all-chronology-locations.csv'))
+
+# BACKGROUND MAP
+countryBoundaries <- sf::read_sf(here('data/geo/mada-region-country-boundaries.gpkg'))
+```
+
+Streamflow seasonality (Figure 1b).
+
+```{r, fig.width=6, fig.height=3}
+ggplot(Qmonth) +
+  geom_boxplot(aes(month, Q)) +
+  theme_classic() +
+  labs(x = NULL, y = 'Monthly streamflow [million m\u00B3]')
+```
+
+# Methodology
+
+## Input selection
+
+### MADA grid points
+
+Calculate the distance between each MADA grid point and P.1.
+
+```{r}
+madaMeta[, d_P1 := geosphere::distGeo(c(long, lat), P1_xy) / 1000, by = ID]
+```
+
+Find the MADA grid points that are within 1,200 km from P.1, and calculate their correlations with P.1 streamflow.
+
+```{r}
+selectedMada <- madaMeta[d_P1 <= 1200][, cor_P1 := cor(madaMat[322:406, ID], Qann$Qa)]
+```
+
+Plot the study region on the map (Figure 2).
+
+```{r, fig.width=6, fig.height=5}
+extend <- c(-1, 1)
+longRange <- selectedMada[, range(long) + extend]
+latRange <- selectedMada[, range(lat) + extend]
+ggplot() +
+  geom_sf(data = countryBoundaries, fill = NA) +
+  geom_point(aes(long, lat), 
+             data = allSites[long %between% longRange & lat %between% latRange], 
+             shape = 17, colour = 'darkgreen', size = 2.5) +
+  geom_point(aes(long, lat, colour = cor_P1), data = selectedMada, size = 4) +
+  geom_point(aes(long, lat), data = P1_df, colour = 'darkred', size = 2, shape = 15) +
+  geom_text(aes(long, lat), label = 'P.1', data = P1_df, 
+            nudge_x = 0.5, nudge_y = -0.5, size = 4) +
+  scale_x_continuous(expand = c(0, 0), limits = longRange) +
+  scale_y_continuous(expand = c(0, 0), limits = latRange) +
+  scale_colour_gradient2(name = 'Correlation', low = 'salmon', high = 'steelblue') +
+  labs(x = NULL, y = NULL) +
+  coord_sf() +
+  theme_bw() +
+  theme(legend.key.height = unit(1, 'cm'))
+```
+
+Compare MADA-streamflow correlations with chronology-streamflow correlations (Table 1).
+
+```{r, rows.print = 11}
+crnMeta[, d_P1 := geosphere::distGeo(c(long, lat), P1_xy) / 1000, by = ID]
+crnCor <- crn[Qann, on = 'year'
+            ][, 
+              { 
+                out <- cor.test(rwi, Qa)
+                list(cor_P1 = round(out$estimate, 2),
+                     p.value = round(out$p.value, 4))
+                }, 
+              by = ID
+            ][crnMeta, on = 'ID'
+            ][, -'name']
+madaCor <- mada[322:406, c('year', 251, 252, 275, 301)
+              ][, melt(.SD, id.var = 'year', variable.name = 'ID', value.name = 'pdsi')
+              ][Qann, on = 'year'
+              ][, 
+                { 
+                  out <- cor.test(pdsi, Qa)
+                  list(cor_P1 = round(out$estimate, 2),
+                       p.value = round(out$p.value, 4))
+                }, 
+                by = ID
+              ][madaMeta, on = 'ID', nomatch = NULL]
+corCompare <- rbind(crnCor, madaCor)
+corCompare[order(d_P1)][, .(ID, d_P1 = round(d_P1, 0), cor_P1, p.value)]
+```
+
+### Principal Component Analysis
+
+```{r}
+pca <-  summary(prcomp(madaMat[, selectedMada$ID], scale. = TRUE))
+pca
+```
+
+The first 12 PCs account for 95% of the variance. 
+
+### Correlations between PCs and streamflow
+
+Now, we perform a bootstrapped correlation analysis on these PCs using a utility function called `cor_pivot()`, which calculates the correlation between one column (the pivot column) of a matrix and each of its other columns.
+
+```{r}
+cor_pivot <- function(X, col = ncol(X)) cor(X[, -col], X[, col])
+```
+
+```{r}
+# Extract the instrumental period
+mat <- cbind(pca$x[322:406, 1:12], log(Qann$Qa))
+bootCor <- boot::tsboot(mat, cor_pivot, 1000, sim = 'geom', l = 50)
+bootCor
+```
+
+We determine if the correlations are significant by checking the 5%-95% quantile range.
+
+```{r}
+corQuantiles <- apply(bootCor$t, 2, function(x) quantile(x, probs = c(0.05, 0.5, 0.95)))
+corQuantiles
+```
+
+From this result, we see that PCs 1, 3, 4, 6, 9, 10, 11, and 12 are significantly correlated with streamflow. We can also visualize these correlations.
+
+```{r, fig.width=7, fig.height=3}
+corDT <- as.data.table(t(corQuantiles))
+setnames(corDT, c('low', 'median', 'high'))
+corDT$PC <- paste0('PC', 1:12)
+corDT[, PC := factor(PC, levels = PC)]
+corDT[, signif := !between(0, low, high)]
+ggplot(corDT) +
+  geom_linerange(aes(PC, ymin = low, ymax = high, colour = signif), size = 1) +
+  geom_point(aes(PC, median, colour = signif), size = 2) +
+  geom_hline(yintercept = 0, colour = 'gray') +
+  scale_colour_manual(name = 'Significance', values = c('lightblue', 'steelblue')) +
+  labs(x = NULL, y = 'Correlation') + 
+  theme_classic()
+```
+
+### Backward selection
+
+Next, we select the principal components using a backward procedure based on the Bayesian Information Criterion (BIC).
+
+```{r}
+X <- pca$x[, 1:12]
+ivs <- summary(leaps::regsubsets(X[322:406, ], log(Qann$Qa), method = 'backward'))
+ivs$bic
+```
+
+The fifth model has the lowest BIC.
+
+```{r}
+names(which(ivs$which[which.min(ivs$bic), ]))[-1]
+```
+
+The selected PCs are 1, 3, 6, 9, and 12. All the selected PCs are significantly correlated with streamflow, so this is a reasonable selection.
+
+## Reconstruction
+
+### Linear regression
+
+We build and cross-validate a linear regression reconstruction to use as a benchmark for our LDS model.
+
+```{r}
+# Input
+pc <- data.table(X[, c(1, 3, 6, 9, 12)])
+bm <- PCR_reconstruction(Qann, pc, start.year = 1600)
+# Cross-validate
+set.seed(321) # To make the cross-validation folds reproducible
+Z <- replicate(100, sort(sample(1:85, 9)), simplify = FALSE)
+bmcv <- cvPCR(Qann, pc, start.year = 1600, Z = Z, metric.space = 'original')
+```
+
+### Linear dynamical system
+
+Since EM is a local search routine, we run it with multiple restarts, each of which has a different initial condition, i.e., different values for $\theta_0$. These different restarts can be run in parallel to speed up the computation. The `ldsr` packages implements parallelism with the `foreach` package. Following the `foreach` philosphy, it is up to the user to choose the parallel backend. Here, we use the `doFuture` backend.
+
+```{r, eval=FALSE}
+doFuture::registerDoFuture()
+future::plan(future::multiprocess)
+```
+
+From our experience, about 20-50 restarts is suffient to learn a good model. The `ldsr` package takes 50 restarts by default. For cross-validation, we can reduce the number of restarts to 20 to speed up the cross-validation. On a 4-core 3.4 GHz desktop, learning takes about 2-3 seconds, and cross-validation takes about a minute.
+
+```{r parallel, eval=FALSE, include=FALSE}
+# This chunk does the actual reconstruction. It takes several minutes on a 4-core 3.4 GHz desktop. It is not run during vignette production to save time.
+doFuture::registerDoFuture()
+future::plan(future::multiprocess)
+u <- v <- t(pc)
+# Build model
+lds <- LDS_reconstruction(Qann, u, v, start.year = 1600)
+ldscv <- cvLDS(Qann, u, v, start.year = 1600, Z = Z, num.restarts = 20, metric.space = 'original')
+saveRDS(lds, here('results/lds.RDS'))
+saveRDS(ldscv, here('results/ldscv.RDS'))
+``` 
+
+```{r, include=FALSE}
+# This chunk reads the pre-produced results so that the vignette can be built quickly.
+u <- v <- t(pc)
+lds <- readRDS(here('results/lds.RDS'))
+ldscv <- readRDS(here('results/ldscv.RDS'))
+```
+
+```{r, eval=FALSE}
+# Take u and v to be the same matrix, which is the selected PCs.
+# Because of matrix convention used in the algorithm, the PC matrix has to be transposed.
+u <- v <- t(pc)
+# Build model
+lds <- LDS_reconstruction(Qann, u, v, start.year = 1600)
+# Cross-validate the LDS model using the same folds as with linear regression.
+ldscv <- cvLDS(Qann, u, v, start.year = 1600, num.restarts = 20, Z = Z, 
+               metric.space = 'original')
+```
+
+# Results
+
+## Model parameters
+
+```{r}
+lds$theta
+```
+
+Compare D with linear regression coefficients (Table 2)
+
+```{r}
+cbind(beta = bm$coeffs[-1], D = c(lds$theta$D))
+```
+
+## Performance comparison
+
+Figure 4.
+
+```{r, fig.width=5, fig.height=5}
+scores <- rbindlist(list(LR = bmcv$metrics.dist, LDS = ldscv$metrics.dist),
+                    idcol = 'model') 
+scores <- melt(scores, id.vars = 'model', 
+       measure.vars = c('R2', 'RE', 'CE', 'nRMSE'), 
+       variable.name = 'metric')
+
+scores[metric == 'R2', metric := 'R\u00B2']
+scores[, metric := factor(metric, levels = c('R\u00b2', 'RE', 'CE', 'nRMSE'))]
+
+ggplot(scores, aes(model, value)) +
+  geom_jitter(colour = 'gray70', width = 0.2) +
+  stat_summary(geom = 'point', fun = 'mean', colour = 'red') +
+  facet_wrap(vars(metric), scales = 'free') +
+  labs(x = NULL, y = 'Metric value') +
+  theme_classic() +
+  theme(strip.background = element_blank())
+```
+
+Note: in the original version of the paper, the performance of LDS was higher than that of linear regression. This turned out to be because of an error in the cross-validation procedure. We have corrected that; LDS and linear regression has equal performance. But LDS gives you a state trajectory as an added benefit.
+
+## Instrumental period
+
+Figure 5.
+
+```{r, fig.width=8, fig.height=4}
+p1 <- ggplot(lds$rec[year %in% Qann$year]) +
+  geom_ribbon(aes(year, ymax = Ql, ymin = Qu), fill = 'gray90') +
+  geom_line(aes(year, Q, colour = 'LDS', linetype = 'LDS')) +
+  geom_line(aes(year, Qa, colour = 'Inst', linetype = 'Inst'), data = Qann) +
+  geom_line(aes(year, Q, colour = 'LR', linetype = 'LR'), 
+            data = bm$rec[year %in% Qann$year]) +
+  scale_linetype_manual(name = NULL, values = c(1, 1, 2)) +
+  scale_colour_manual(name = NULL, values = c('darkorange', 'black', 'black')) +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(x = NULL, y = 'Annual streamflow [million m\u00B3]') +
+  theme_classic() +
+  theme(axis.text.x = element_blank(),
+        axis.line.x = element_blank(),
+        axis.ticks.x = element_blank())
+
+p2 <- ggplot(lds$rec[year %in% Qann$year]) +
+  geom_ribbon(aes(year, ymax = Xl, ymin = Xu), fill = 'gray90') +
+  geom_hline(yintercept = 0, colour = 'gray50') +
+  geom_line(aes(year, X)) +
+  labs(x = NULL, y = 'Catchment state [-]') +
+  theme_classic()
+
+p1 / p2 + plot_layout(heights = c(1, 0.6))
+```
+
+## Residuals
+
+Figure 6.
+
+```{r, fig.width=6, fig.height=6}
+bmr <- log(bm$rec$Q[322:406]) - log(Qann$Qa)
+ldsr <- log(lds$rec$Q[322:406]) - log(Qann$Qa)
+
+probs = c(0.1, 0.9)
+par(mfrow = c(2,2), ps = 10)
+
+par(mai = c(0.7, 0.7, 0.6, 0.2))
+
+qqnorm(bmr, ylim = c(-1, 1), main = '', lwd = 1, pch = 16)
+qqline(bmr, probs = probs, qtype = 5)
+mtext('Linear regression', 3, line = 2.5, font = 2)
+mtext('(a)', 3, line = 1, adj = 0, font = 2, cex = 0.75)
+
+qqnorm(ldsr, ylim = c(-1, 1), main = '', lwd = 1, pch = 16)
+qqline(ldsr, probs = probs, qtype = 5)
+mtext('Linear dynamical system', 3, line = 2.5, font = 2)
+mtext('(b)', 3, line = 1, adj = 0, font = 2, cex = 0.75)
+
+par(mai = c(0.7, 0.7, 0.3, 0.2))
+acf(bmr, main = '')
+mtext('(c)', 3, line = 1, adj = 0, font = 2, cex = 0.75)
+
+acf(ldsr, main = '')
+mtext('(d)', 3, line = 1, adj = 0, font = 2, cex = 0.75)
+```
+
+## History of regime shifts
+
+Figure 7.
+
+```{r, fig.width=8, fig.height=4}
+# Drought periods
+modelDroughts <- data.frame(startYear = c(1638, 1672, 1791, 1877), 
+                            endYear = c(1658, 1695, 1797, 1879))
+megadroughts <- data.frame(startYear = c(1638, 1756, 1789.5, 1792, 1876),
+                           endYear = c(1641, 1768, 1790.5, 1796, 1878))
+
+p1 <- ggplot(lds$rec) +
+  geom_ribbon(aes(year, ymax = Ql, ymin = Qu), fill = 'gray90') +
+  geom_hline(aes(yintercept = mean(Q)), colour = 'red2') +
+  geom_line(aes(year, Q, colour = 'LR', linetype = 'LR'), data = bm$rec) +
+  geom_line(aes(year, Q, colour = 'LDS', linetype = 'LDS')) +
+  scale_colour_manual(name = NULL, values = c('black', 'steelblue')) +
+  scale_linetype_manual(name = NULL, values = c(1, 2)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  labs(x = NULL, y = 'Annual streamflow [million m\u00B3]') +
+  theme_classic() +
+  theme(axis.text.x = element_blank(),
+        axis.line.x = element_blank(),
+        axis.ticks.x = element_blank())
+
+p2 <- ggplot(lds$rec) +
+  geom_ribbon(aes(year, ymax = Xl, ymin = Xu), fill = 'gray90') +
+  geom_hline(yintercept = 0, colour = 'red2') +
+  geom_line(aes(year, X)) +
+  geom_rect(aes(xmin = startYear, xmax = endYear, ymin = -Inf, ymax = Inf), 
+            data = modelDroughts, fill = 'yellow', alpha = 0.4) +
+  geom_rect(aes(xmin = startYear, xmax = endYear, ymin = -Inf, ymax = Inf), 
+            data = megadroughts, fill = 'darkorange', alpha = 0.4) +
+  labs(x = NULL, y = 'Catchment state [-]') +
+  theme_classic()
+
+p1 / p2 + plot_layout(heights = c(1, 0.6))
+```
+
+## Wavelet analysis
+
+We compare the wavelet spectrum of the reconstructed streamflow with that of the reconstructed SST by Tierney et al (2015).
+
+```{r, results='hide', fig.keep=TRUE, fig.width=6, fig.height=6}
+# Wavet analysis of reconstructed streamflow
+lds.w <- WaveletComp::analyze.wavelet(lds$rec, 'Q', loess.span = 0, verbose = FALSE)
+lds.w$axis.1 <- lds.w$axis.1 + 1600
+lds.w$coi.1 <- lds.w$coi.1 + 1600
+# Read SST reconstruction
+epacSST <- fread(here('data/epac-sst.csv'))
+# Wavelet analysis of SST reconstruction
+sst.w <- WaveletComp::analyze.wavelet(epacSST, 'sst', loess.span = 0, verbose = FALSE)
+sst.w$axis.1 <- sst.w$axis.1 + 1607
+sst.w$coi.1 <- sst.w$coi.1 + 1607
+## Plots
+par(mfrow = c(2,1), mar = c(3, 4, 1, 2))
+lds.wimage <- WaveletComp::wt.image(lds.w, 
+                                    timelab = 'Year', 
+                                    periodlab = 'Period', 
+                                    color.key = 'q', 
+                                    plot.ridge = FALSE, 
+                                    plot.contour = FALSE,
+                                    graphics.reset = FALSE)
+sst.wimage <- WaveletComp::wt.image(sst.w, 
+                                    timelab = 'Year',
+                                    periodlab = 'Period', 
+                                    color.key = 'q', 
+                                    plot.ridge = FALSE, 
+                                    plot.contour = FALSE)
+```
+
+## Stochastic replicates
+
+Build 100 stochastic replicates.
+
+```{r}
+set.seed(500)
+reps <- LDS_rep(lds$theta, u, v, years = lds$rec$year, mu = mean(log(Qann$Qa)))
+```
+
+Plot the replicates (Figure 9).
+
+```{r}
+plot_replicates <- function(reps, rec) {
+
+  p1 <- ggplot(reps) +
+    geom_line(aes(year, simQ, group = rep), colour = 'gray90') +
+    geom_line(aes(year, Q), data = rec, colour = 'black') +
+    labs(x = NULL, y = 'Annual streamflow [million m\u00B3]') +
+    theme_classic() +
+    theme(axis.line.x = element_blank(),
+          axis.text.x = element_blank(),
+          axis.ticks.x = element_blank())
+  
+  p2 <- ggplot(reps) +
+    geom_line(aes(year, simX, group = rep), colour = 'gray90') +
+    geom_line(aes(year, X), data = rec, colour = 'black') +
+    labs(x = 'Year',
+         y = 'Flow regime') +
+    theme_classic()
+  
+  p1 / p2 + plot_layout(heights = c(1, 0.6))
+}
+```
+
+```{r, fig.width=7, fig.height=4}
+plot_replicates(reps, lds$rec)
+```
+
+# References
+
+Cook, E. R., Anchukaitis, K. J., Buckley, B. M., D’Arrigo, R. D., Jacoby, G. C., & Wright, W. E. (2010). Asian Monsoon Failure and Megadrought During the Last Millennium. Science, 328(5977), 486–489. https://doi.org/10.1126/science.1185188
+
+Cheng, S., & Sabes, P. N. (2006). Modeling Sensorimotor Learning with Linear Dynamical Systems. Neural Computation, 18(4), 760–793. https://doi.org/10.1162/089976606775774651
+
+Ghahramani, Z., & Hinton, G. E. (1996). Parameter estimation for linear dynamical systems. Retrieved from http://mlg.eng.cam.ac.uk/zoubin/papers/tr-96-2.pdf
+
+Nguyen, H. T. T., & Galelli, S. (2018). A Linear Dynamical Systems Approach to Streamflow Reconstruction Reveals History of Regime Shifts in Northern Thailand. Water Resources Research, 54(3), 2057–2077. https://doi.org/10.1002/2017WR022114
+
+Shumway, R. H., & Stoffer, D. S. (1982). An Approach to The Time Series Smoothing and Forecasting Using the EM Algorithm. Journal of Time Series Analysis, 3(4), 253–264. https://doi.org/10.1111/j.1467-9892.1982.tb00349.x
+
+Tierney, J. E., Abram, N. J., Anchukaitis, K. J., Evans, M. N., Giry, C., Kilbourne, K. H., … Zinke, J. (2015). Tropical sea surface temperatures for the past four centuries reconstructed from coral archives. Paleoceanography, 30(3), 226–252. https://doi.org/10.1002/2014PA002717
