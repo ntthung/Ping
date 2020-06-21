@@ -116,6 +116,10 @@ ggplot() +
   theme(legend.key.height = unit(1, 'cm'))
 ```
 
+```{r, include=FALSE, eval=FALSE}
+ggsave(here('figures/LDS-Ping-mada-cor.pdf'), width = 6, height = 5, unit = 'in')
+```
+
 Compare MADA-streamflow correlations with chronology-streamflow correlations (Table 1).
 
 ```{r, rows.print = 11}
@@ -236,7 +240,7 @@ doFuture::registerDoFuture()
 future::plan(future::multiprocess)
 ```
 
-From our experience, about 20-50 restarts is suffient to learn a good model. The `ldsr` package takes 50 restarts by default. For cross-validation, we can reduce the number of restarts to 20 to speed up the cross-validation. On a 4-core 3.4 GHz desktop, learning takes about 2-3 seconds, and cross-validation takes about a minute.
+From our experience, about 20-50 restarts is sufficient to learn a good model. The `ldsr` package takes 50 restarts by default. For cross-validation, we can reduce the number of restarts to 20 to speed up the cross-validation. On a 4-core 3.4 GHz desktop, learning takes about 2-3 seconds, and cross-validation takes about a minute.
 
 ```{r parallel, eval=FALSE, include=FALSE}
 # This chunk does the actual reconstruction. It takes several minutes on a 4-core 3.4 GHz desktop. It is not run during vignette production to save time.
@@ -305,18 +309,22 @@ ggplot(scores, aes(model, value)) +
   theme(strip.background = element_blank())
 ```
 
+```{r, include=FALSE, eval=FALSE}
+ggsave(here('figures/LDS_Ping_scores.pdf'), width = 5, height = 5, unit = 'in')
+```
+
 Note: in the original version of the paper, the performance of LDS was higher than that of linear regression. This turned out to be because of an error in the cross-validation procedure. We have corrected that; LDS and linear regression has equal performance. But LDS gives you a state trajectory as an added benefit.
 
 ## Instrumental period
 
 Figure 5.
 
-```{r, fig.width=8, fig.height=4}
+```{r, fig.width=7, fig.height=5}
 p1 <- ggplot(lds$rec[year %in% Qann$year]) +
   geom_ribbon(aes(year, ymax = Ql, ymin = Qu), fill = 'gray90') +
   geom_line(aes(year, Q, colour = 'LDS', linetype = 'LDS')) +
-  geom_line(aes(year, Qa, colour = 'Inst', linetype = 'Inst'), data = Qann) +
-  geom_line(aes(year, Q, colour = 'LR', linetype = 'LR'), 
+  geom_line(aes(year, Qa, colour = 'Instrumental', linetype = 'Instrumental'), data = Qann) +
+  geom_line(aes(year, Q, colour = 'Linear regression', linetype = 'Linear regression'), 
             data = bm$rec[year %in% Qann$year]) +
   scale_linetype_manual(name = NULL, values = c(1, 1, 2)) +
   scale_colour_manual(name = NULL, values = c('darkorange', 'black', 'black')) +
@@ -325,7 +333,9 @@ p1 <- ggplot(lds$rec[year %in% Qann$year]) +
   theme_classic() +
   theme(axis.text.x = element_blank(),
         axis.line.x = element_blank(),
-        axis.ticks.x = element_blank())
+        axis.ticks.x = element_blank(),
+        legend.position = 'top', 
+        legend.key.width = unit(1.5, 'cm'))
 
 p2 <- ggplot(lds$rec[year %in% Qann$year]) +
   geom_ribbon(aes(year, ymax = Xl, ymin = Xu), fill = 'gray90') +
@@ -335,6 +345,10 @@ p2 <- ggplot(lds$rec[year %in% Qann$year]) +
   theme_classic()
 
 p1 / p2 + plot_layout(heights = c(1, 0.6))
+```
+
+```{r, include=FALSE, eval=FALSE}
+ggsave(here('figures/LDS-Ping-instrumental.pdf'), width = 7, height = 5, unit = 'in')
 ```
 
 ## Residuals
@@ -368,11 +382,40 @@ acf(ldsr, main = '')
 mtext('(d)', 3, line = 1, adj = 0, font = 2, cex = 0.75)
 ```
 
+```{r, include=FALSE, eval=FALSE}
+pdf(here('figures/LDS-Ping-residuals.pdf'), width = 6, height = 6)
+bmr <- log(bm$rec$Q[322:406]) - log(Qann$Qa)
+ldsr <- log(lds$rec$Q[322:406]) - log(Qann$Qa)
+
+probs = c(0.1, 0.9)
+par(mfrow = c(2,2), ps = 10)
+
+par(mai = c(0.7, 0.7, 0.6, 0.2))
+
+qqnorm(bmr, ylim = c(-1, 1), main = '', lwd = 1, pch = 16)
+qqline(bmr, probs = probs, qtype = 5)
+mtext('Linear regression', 3, line = 2.5, font = 2)
+mtext('(a)', 3, line = 1, adj = 0, font = 2, cex = 0.75)
+
+qqnorm(ldsr, ylim = c(-1, 1), main = '', lwd = 1, pch = 16)
+qqline(ldsr, probs = probs, qtype = 5)
+mtext('Linear dynamical system', 3, line = 2.5, font = 2)
+mtext('(b)', 3, line = 1, adj = 0, font = 2, cex = 0.75)
+
+par(mai = c(0.7, 0.7, 0.3, 0.2))
+acf(bmr, main = '')
+mtext('(c)', 3, line = 1, adj = 0, font = 2, cex = 0.75)
+
+acf(ldsr, main = '')
+mtext('(d)', 3, line = 1, adj = 0, font = 2, cex = 0.75)
+dev.off()
+```
+
 ## History of regime shifts
 
 Figure 7.
 
-```{r, fig.width=8, fig.height=4}
+```{r, fig.width=7, fig.height=5}
 # Drought periods
 modelDroughts <- data.frame(startYear = c(1638, 1672, 1791, 1877), 
                             endYear = c(1658, 1695, 1797, 1879))
@@ -382,7 +425,7 @@ megadroughts <- data.frame(startYear = c(1638, 1756, 1789.5, 1792, 1876),
 p1 <- ggplot(lds$rec) +
   geom_ribbon(aes(year, ymax = Ql, ymin = Qu), fill = 'gray90') +
   geom_hline(aes(yintercept = mean(Q)), colour = 'red2') +
-  geom_line(aes(year, Q, colour = 'LR', linetype = 'LR'), data = bm$rec) +
+  geom_line(aes(year, Q, colour = 'Linear regression', linetype = 'Linear regression'), data = bm$rec) +
   geom_line(aes(year, Q, colour = 'LDS', linetype = 'LDS')) +
   scale_colour_manual(name = NULL, values = c('black', 'steelblue')) +
   scale_linetype_manual(name = NULL, values = c(1, 2)) +
@@ -391,7 +434,9 @@ p1 <- ggplot(lds$rec) +
   theme_classic() +
   theme(axis.text.x = element_blank(),
         axis.line.x = element_blank(),
-        axis.ticks.x = element_blank())
+        axis.ticks.x = element_blank(),
+        legend.position = 'top', 
+        legend.key.width = unit(1.5, 'cm'))
 
 p2 <- ggplot(lds$rec) +
   geom_ribbon(aes(year, ymax = Xl, ymin = Xu), fill = 'gray90') +
@@ -405,6 +450,10 @@ p2 <- ggplot(lds$rec) +
   theme_classic()
 
 p1 / p2 + plot_layout(heights = c(1, 0.6))
+```
+
+```{r, include=FALSE, eval=FALSE}
+ggsave(here('figures/LDS-Ping-full-period.pdf'), width = 7, height = 5, unit = 'in')
 ```
 
 ## Wavelet analysis
@@ -437,6 +486,26 @@ sst.wimage <- WaveletComp::wt.image(sst.w,
                                     color.key = 'q', 
                                     plot.ridge = FALSE, 
                                     plot.contour = FALSE)
+```
+
+
+```{r, include=FALSE, eval=FALSE}
+pdf(here('figures/LDS-Ping-wavelet.pdf'), width = 6, height = 6)
+par(mfrow = c(2,1), mar = c(3, 4, 1, 2))
+lds.wimage <- WaveletComp::wt.image(lds.w, 
+                                    timelab = 'Year', 
+                                    periodlab = 'Period', 
+                                    color.key = 'q', 
+                                    plot.ridge = FALSE, 
+                                    plot.contour = FALSE,
+                                    graphics.reset = FALSE)
+sst.wimage <- WaveletComp::wt.image(sst.w, 
+                                    timelab = 'Year',
+                                    periodlab = 'Period', 
+                                    color.key = 'q', 
+                                    plot.ridge = FALSE, 
+                                    plot.contour = FALSE)
+dev.off()
 ```
 
 ## Stochastic replicates
@@ -476,6 +545,11 @@ plot_replicates <- function(reps, rec) {
 ```{r, fig.width=7, fig.height=4}
 plot_replicates(reps, lds$rec)
 ```
+
+```{r, include=FALSE, eval=FALSE}
+ggsave(here('figures/LDS-Ping-stochastc.pdf'), width = 7, height = 4, unit = 'in')
+```
+
 
 # References
 
